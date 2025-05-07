@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Phaser Mask SpriteSheet 範例</title>
+  <script src="//cdn.jsdelivr.net/npm/phaser@3.55.2/dist/phaser.min.js"></script>
+  <style>
+    body { margin:0; padding:0; }
+  </style>
+</head>
+<body>
+<script>
+  // Phaser 初始化設定
+  const config = {
+    type: Phaser.AUTO,
+    width: 800,
+    height: 600,
+    backgroundColor: '#DDDDDD',
+    physics: {
+      default: 'arcade',
+      arcade: { gravity: false, debug: false }
+    },
+    scale: {
+      mode: Phaser.Scale.FIT,
+      autoCenter: Phaser.Scale.CENTER_BOTH
+    },
+    scene: { preload, create, update }
+  };
+  const game = new Phaser.Game(config);
+
+  // 全域變數
+  let balls = [], targetZones = [];
+  let paddle, cursors, maskSprite, canvasContext;
+
+  function preload() {
+    // 載入基本資源
+    this.load.image('ball', 'assets/ball.png');
+    this.load.image('paddle', 'assets/paddle.png');
+
+    // 載入遮罩 Sprite Sheet：
+    // － frameWidth: 56px, frameHeight: 56px, 共 63 幀
+    this.load.spritesheet('maskAnim', 'assets/mask_spritesheet.png', {
+      frameWidth: 56,
+      frameHeight: 56
+    });
+  }
+
+  function create() {
+    // 建立游標鍵
+    cursors = this.input.keyboard.createCursorKeys();
+
+    // 建立可碰撞的 paddle
+    paddle = this.physics.add.sprite(400, 550, 'paddle')
+                      .setImmovable();
+
+    // 建立初始球體
+    spawnBall.call(this, 400, 300, 100, 100);
+
+    // world-bounds 碰撞觸發分裂
+    this.physics.world.on('worldbounds', body => {
+      if (body.gameObject.texture.key === 'ball') {
+        splitBall.call(this, body.gameObject);
+      }
+    });
+
+    // 點擊切換背景色
+    this.input.on('pointerup', () => {
+      let c = Phaser.Display.Color.RandomRGB();
+      this.cameras.main.backgroundColor = c;
+    });
+
+    // 右鍵新增 zone
+    this.input.on('pointerdown', pointer => {
+      if (pointer.rightButtonDown()) {
+        targetZones.push({ x: pointer.x, y: pointer.y });
+      }
+    });
+
+    // 統計文字
+    this.statsText = this.add.text(10, 10, '', {
+      fontSize: '16px',
+      fill: '#000000',
+      backgroundColor: '#ffffff88',
+      padding: { x:6, y:4 }
+    }).setDepth(999).setScrollFactor(0);
+
+    // 建立 maskCanvas（大小同遊戲畫面）
+    this.maskCanvas = this.textures.createCanvas('maskCanvas', 800, 600);
+    canvasContext = this.maskCanvas.getContext();
+
+    // 建立隱藏的 maskSprite 來播放 maskAnim 動畫
+    maskSprite = this.add.sprite(0, 0, 'maskAnim').setVisible(false);
+    this.anims.create({
+      key: 'maskPlay',
+      frames: this.anims.generateFrameNumbers('maskAnim', { start: 0, end: 62 }),
+      frameRate: 12,
+      repeat: -1
+    });
+    maskSprite.play('maskPlay');
+  }
+
+  // 每次 spawn 一顆球
+  function spawnBall(x, y, vx, vy) {
+    let b = this.physics.add.sprite(x, y, 'ball')
+               .setVelocity(vx, vy)
+               .setCollideWorldBounds(true)
+               .setBounce(1);
+    b.body.onWorldBounds = true;
+    balls.push(b);
+    this.physics.add.collider(b, paddle, () => splitBall.call(this, b));
+  }
+
+  // 分裂球
+  function splitBall(original) {
+    if (balls.length < 4000) {
+      spawnBall.call(
+        this,
+        original.x, original.y,
+        Phaser.Math.Between(-200, 200),
+        Phaser.Math.Between(-200, 200)
+      );
+    }
+  }
+
+  function update() {
+    // 1) 每幀把 maskSprite 當前影格畫到 maskCanvas
+    const cf = maskSprite.anims.currentFrame.frame;
+    const srcImg = this.textures.get('maskAnim').getSourceImage();
+    canvasContext.clearRect(0, 0, 800, 600);
+    canvasContext.drawImage(
+      srcImg,
+      cf.cutX, cf.cutY, cf.width, cf.height,
+      0, 0, 800, 600
+    );
+    this.maskCanvas.refresh();
+
+    // 2) 更新統計文字
+    const fps = Math.floor(this.game.loop.actualFps);
+    const mem = performance.memory
+      ? (performance.memory.usedJSHeapSize / 1024 / 1024).toFixed(2) + ' MB'
+      : 'N/A';
+    this.statsText.setText(
+      `Memory: ${mem}\nBalls: ${balls.length}\nZones: ${targetZones.length}\nFPS: ${fps}`
+    );
+
+    // 3) 對每顆球取樣遮罩像素並上色／清除
+    balls.forEach(b => {
+      let inside = targetZones.some(z =>
+        Phaser.Math.Distance.Between(b.x, b.y, z.x, z.y) <= 50
+      );
+      let p = canvasContext.getImageData(
+        Math.floor(b.x),
+        Math.floor(b.y),
+        1, 1
+      ).data;
+
+      if (p[3] > 0) {
+        // 有透明度 → 用遮罩色
+        let hex = (p[0] << 16) + (p[1] << 8) + p[2];
+        b.setTint(hex);
+      } else if (inside) {
+        // 在 zone 裡 → 黃色
+        b.setTint(0xffff00);
+      } else {
+        b.clearTint();
+      }
+    });
+
+    // 4) paddle 跟隨滑鼠＋鍵盤移動
+    paddle.x = this.input.x;
+    if (cursors.left.isDown) paddle.x -= 10;
+    else if (cursors.right.isDown) paddle.x += 10;
+    if (cursors.up.isDown) paddle.y -= 10;
+    else if (cursors.down.isDown) paddle.y += 10;
+  }
+</script>
+</body>
+</html>
